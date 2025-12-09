@@ -187,11 +187,15 @@ actor SessionStore {
             if let toolUseId = event.toolUseId, let toolName = event.tool {
                 session.toolTracker.startTool(id: toolUseId, name: toolName)
 
-                // Create placeholder tool entry if not in chatItems yet
-                // This handles the case where hook arrives before JSONL is written
+                // Skip creating top-level placeholder for subagent tools
+                // They'll appear under their parent Task instead
+                let isSubagentTool = session.subagentState.hasActiveSubagent && toolName != "Task"
+                if isSubagentTool {
+                    return
+                }
+
                 let toolExists = session.chatItems.contains { $0.id == toolUseId }
                 if !toolExists {
-                    // Extract input from hook event
                     var input: [String: String] = [:]
                     if let hookInput = event.toolInput {
                         for (key, value) in hookInput {
@@ -251,10 +255,9 @@ actor SessionStore {
         switch event.event {
         case "PreToolUse":
             if event.tool == "Task", let toolUseId = event.toolUseId {
-                // Task tool starting - track for phase management
-                session.subagentState.startTask(taskToolId: toolUseId)
+                let description = event.toolInput?["description"]?.value as? String
+                session.subagentState.startTask(taskToolId: toolUseId, description: description)
                 Self.logger.debug("Started Task subagent tracking: \(toolUseId.prefix(12), privacy: .public)")
-                // Subagent tools will be populated when Task completes via populateSubagentToolsFromAgentFiles
             }
 
         case "PostToolUse":
@@ -527,68 +530,102 @@ actor SessionStore {
             Self.logger.debug("Clear reconciliation: kept \(session.chatItems.count) of \(previousCount) items")
         }
 
-        // Merge new messages into chat history
-        let existingIds = Set(session.chatItems.map { $0.id })
+        if payload.isIncremental {
+            let existingIds = Set(session.chatItems.map { $0.id })
 
-        for message in payload.messages {
-            for (blockIndex, block) in message.content.enumerated() {
-                // For tool_use blocks, check if we need to update a placeholder's timestamp
-                if case .toolUse(let tool) = block {
-                    // Find existing placeholder and update its timestamp
-                    if let idx = session.chatItems.firstIndex(where: { $0.id == tool.id }) {
-                        if case .toolCall(let existingTool) = session.chatItems[idx].type {
-                            // Update with correct timestamp and richer input from JSONL
-                            session.chatItems[idx] = ChatHistoryItem(
-                                id: tool.id,
-                                type: .toolCall(ToolCallItem(
-                                    name: tool.name,
-                                    input: tool.input,  // Use JSONL input (may be more complete)
-                                    status: existingTool.status,  // Preserve current status
-                                    result: existingTool.result,
-                                    structuredResult: existingTool.structuredResult,
-                                    subagentTools: existingTool.subagentTools
-                                )),
-                                timestamp: message.timestamp  // Correct timestamp from JSONL
-                            )
+            for message in payload.messages {
+                for (blockIndex, block) in message.content.enumerated() {
+                    if case .toolUse(let tool) = block {
+                        if let idx = session.chatItems.firstIndex(where: { $0.id == tool.id }) {
+                            if case .toolCall(let existingTool) = session.chatItems[idx].type {
+                                session.chatItems[idx] = ChatHistoryItem(
+                                    id: tool.id,
+                                    type: .toolCall(ToolCallItem(
+                                        name: tool.name,
+                                        input: tool.input,
+                                        status: existingTool.status,
+                                        result: existingTool.result,
+                                        structuredResult: existingTool.structuredResult,
+                                        subagentTools: existingTool.subagentTools
+                                    )),
+                                    timestamp: message.timestamp
+                                )
+                            }
+                            continue
                         }
-                        continue  // Skip creating new item
+                    }
+
+                    let item = createChatItem(
+                        from: block,
+                        message: message,
+                        blockIndex: blockIndex,
+                        existingIds: existingIds,
+                        completedTools: payload.completedToolIds,
+                        toolResults: payload.toolResults,
+                        structuredResults: payload.structuredResults,
+                        toolTracker: &session.toolTracker
+                    )
+
+                    if let item = item {
+                        session.chatItems.append(item)
                     }
                 }
+            }
+        } else {
+            let existingIds = Set(session.chatItems.map { $0.id })
 
-                let item = createChatItem(
-                    from: block,
-                    message: message,
-                    blockIndex: blockIndex,
-                    existingIds: existingIds,
-                    completedTools: payload.completedToolIds,
-                    toolResults: payload.toolResults,
-                    structuredResults: payload.structuredResults,
-                    toolTracker: &session.toolTracker
-                )
+            for message in payload.messages {
+                for (blockIndex, block) in message.content.enumerated() {
+                    if case .toolUse(let tool) = block {
+                        if let idx = session.chatItems.firstIndex(where: { $0.id == tool.id }) {
+                            if case .toolCall(let existingTool) = session.chatItems[idx].type {
+                                session.chatItems[idx] = ChatHistoryItem(
+                                    id: tool.id,
+                                    type: .toolCall(ToolCallItem(
+                                        name: tool.name,
+                                        input: tool.input,
+                                        status: existingTool.status,
+                                        result: existingTool.result,
+                                        structuredResult: existingTool.structuredResult,
+                                        subagentTools: existingTool.subagentTools
+                                    )),
+                                    timestamp: message.timestamp
+                                )
+                            }
+                            continue
+                        }
+                    }
 
-                if let item = item {
-                    session.chatItems.append(item)
+                    let item = createChatItem(
+                        from: block,
+                        message: message,
+                        blockIndex: blockIndex,
+                        existingIds: existingIds,
+                        completedTools: payload.completedToolIds,
+                        toolResults: payload.toolResults,
+                        structuredResults: payload.structuredResults,
+                        toolTracker: &session.toolTracker
+                    )
+
+                    if let item = item {
+                        session.chatItems.append(item)
+                    }
                 }
             }
+
+            session.chatItems.sort { $0.timestamp < $1.timestamp }
         }
 
-        // Sort by timestamp
-        session.chatItems.sort { $0.timestamp < $1.timestamp }
         session.toolTracker.lastSyncTime = Date()
 
-        // Populate/correct subagent tools from agent JSONL files (definitive source)
-        // This ensures correct tool association for parallel Tasks
         await populateSubagentToolsFromAgentFiles(
             session: &session,
             cwd: payload.cwd,
             structuredResults: payload.structuredResults
         )
 
-        // Save session state first (for chat item updates)
         sessions[payload.sessionId] = session
 
-        // Now emit toolCompleted events for tools that have results in JSONL
-        // This ensures tool completions flow through the same event processing as approvals
         await emitToolCompletionEvents(
             sessionId: payload.sessionId,
             session: session,
@@ -611,16 +648,22 @@ actor SessionStore {
                   case .task(let taskResult) = structuredResult,
                   !taskResult.agentId.isEmpty else { continue }
 
-            // Parse subagent tools from agent JSONL file
+            let taskToolId = session.chatItems[i].id
+
+            // Store agentId → description mapping for AgentOutputTool display
+            if let description = session.subagentState.activeTasks[taskToolId]?.description {
+                session.subagentState.agentDescriptions[taskResult.agentId] = description
+            } else if let description = tool.input["description"] {
+                session.subagentState.agentDescriptions[taskResult.agentId] = description
+            }
+
             let subagentToolInfos = await ConversationParser.shared.parseSubagentTools(
                 agentId: taskResult.agentId,
                 cwd: cwd
             )
 
-            // Only update if we got tools from the agent file
             guard !subagentToolInfos.isEmpty else { continue }
 
-            // Convert to SubagentToolCall array
             tool.subagentTools = subagentToolInfos.map { info in
                 SubagentToolCall(
                     id: info.id,
@@ -631,14 +674,13 @@ actor SessionStore {
                 )
             }
 
-            let itemId = session.chatItems[i].id
             session.chatItems[i] = ChatHistoryItem(
-                id: itemId,
+                id: taskToolId,
                 type: .toolCall(tool),
                 timestamp: session.chatItems[i].timestamp
             )
 
-            Self.logger.debug("Populated \(subagentToolInfos.count) subagent tools for Task \(itemId.prefix(12), privacy: .public) from agent \(taskResult.agentId.prefix(8), privacy: .public)")
+            Self.logger.debug("Populated \(subagentToolInfos.count) subagent tools for Task \(taskToolId.prefix(12), privacy: .public) from agent \(taskResult.agentId.prefix(8), privacy: .public)")
         }
     }
 
@@ -667,6 +709,7 @@ actor SessionStore {
         }
     }
 
+    /// Create chat item (checks existingIds to avoid duplicates)
     private func createChatItem(
         from block: MessageBlock,
         message: ChatMessage,
@@ -884,30 +927,28 @@ actor SessionStore {
             try? await Task.sleep(nanoseconds: syncDebounceNs)
             guard !Task.isCancelled else { return }
 
-            // Parse and create update event
-            let messages = await ConversationParser.shared.parseFullConversation(
+            // Parse incrementally - only get NEW messages since last call
+            let result = await ConversationParser.shared.parseIncremental(
                 sessionId: sessionId,
                 cwd: cwd
             )
 
-            // Check if /clear was detected during parsing
-            let clearDetected = await ConversationParser.shared.checkAndConsumeClearDetected(for: sessionId)
-            if clearDetected {
+            if result.clearDetected {
                 await self?.process(.clearDetected(sessionId: sessionId))
-                // After clear, we still want to process any messages that came after /clear
             }
 
-            let completedTools = await ConversationParser.shared.completedToolIds(for: sessionId)
-            let toolResults = await ConversationParser.shared.toolResults(for: sessionId)
-            let structuredResults = await ConversationParser.shared.structuredResults(for: sessionId)
+            guard !result.newMessages.isEmpty || result.clearDetected else {
+                return
+            }
 
             let payload = FileUpdatePayload(
                 sessionId: sessionId,
                 cwd: cwd,
-                messages: messages,
-                completedToolIds: completedTools,
-                toolResults: toolResults,
-                structuredResults: structuredResults
+                messages: result.newMessages,
+                isIncremental: !result.clearDetected,
+                completedToolIds: result.completedToolIds,
+                toolResults: result.toolResults,
+                structuredResults: result.structuredResults
             )
 
             await self?.process(.fileUpdated(payload))

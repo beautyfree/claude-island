@@ -292,7 +292,7 @@ struct ChatView: View {
                     }
 
                     ForEach(history.reversed()) { item in
-                        MessageItemView(item: item)
+                        MessageItemView(item: item, sessionId: sessionId)
                             .padding(.horizontal, 16)
                             .scaleEffect(x: 1, y: -1)
                             .transition(.asymmetric(
@@ -522,6 +522,7 @@ struct ChatView: View {
 
 struct MessageItemView: View {
     let item: ChatHistoryItem
+    let sessionId: String
 
     var body: some View {
         switch item.type {
@@ -530,7 +531,7 @@ struct MessageItemView: View {
         case .assistant(let text):
             AssistantMessageView(text: text)
         case .toolCall(let tool):
-            ToolCallView(tool: tool)
+            ToolCallView(tool: tool, sessionId: sessionId)
         case .thinking(let text):
             ThinkingView(text: text)
         case .interrupted:
@@ -621,6 +622,7 @@ struct ProcessingIndicatorView: View {
 
 struct ToolCallView: View {
     let tool: ToolCallItem
+    let sessionId: String
 
     @State private var pulseOpacity: Double = 0.6
     @State private var isExpanded: Bool = false
@@ -661,16 +663,22 @@ struct ToolCallView: View {
         tool.name != "Task" && tool.name != "Edit" && hasResult
     }
 
-    /// Whether content should be shown (Edit always, others when expanded)
     private var showContent: Bool {
         tool.name == "Edit" || isExpanded
     }
 
+    private var agentDescription: String? {
+        guard tool.name == "AgentOutputTool",
+              let agentId = tool.input["agentId"],
+              let sessionDescriptions = ChatHistoryManager.shared.agentDescriptions[sessionId] else {
+            return nil
+        }
+        return sessionDescriptions[agentId]
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            // Header row with status dot, name, and status text
             HStack(spacing: 6) {
-                // Status dot
                 Circle()
                     .fill(statusColor.opacity(tool.status == .running || tool.status == .waitingForApproval ? pulseOpacity : 0.6))
                     .frame(width: 6, height: 6)
@@ -687,16 +695,21 @@ struct ToolCallView: View {
                     .foregroundColor(textColor)
                     .fixedSize()
 
-                // Status text or input preview
-                // Task tools show description + tool count
                 if tool.name == "Task" && !tool.subagentTools.isEmpty {
-                    Text("\(tool.statusDisplay.text) (\(tool.subagentTools.count) tools)")
+                    let taskDesc = tool.input["description"] ?? "Running agent..."
+                    Text("\(taskDesc) (\(tool.subagentTools.count) tools)")
+                        .font(.system(size: 11))
+                        .foregroundColor(textColor.opacity(0.7))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                } else if tool.name == "AgentOutputTool", let desc = agentDescription {
+                    let blocking = tool.input["block"] == "true"
+                    Text(blocking ? "Waiting: \(desc)" : desc)
                         .font(.system(size: 11))
                         .foregroundColor(textColor.opacity(0.7))
                         .lineLimit(1)
                         .truncationMode(.tail)
                 } else if MCPToolFormatter.isMCPTool(tool.name) && !tool.input.isEmpty {
-                    // MCP tools show formatted args
                     Text(MCPToolFormatter.formatArgs(tool.input))
                         .font(.system(size: 11))
                         .foregroundColor(textColor.opacity(0.7))

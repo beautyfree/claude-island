@@ -266,9 +266,13 @@ struct SubagentState: Equatable, Sendable {
     /// When multiple Tasks run in parallel, we use insertion order rather than timestamps
     var taskStack: [String]
 
-    nonisolated init(activeTasks: [String: TaskContext] = [:], taskStack: [String] = []) {
+    /// Mapping of agentId to Task description (for AgentOutputTool display)
+    var agentDescriptions: [String: String]
+
+    nonisolated init(activeTasks: [String: TaskContext] = [:], taskStack: [String] = [], agentDescriptions: [String: String] = [:]) {
         self.activeTasks = activeTasks
         self.taskStack = taskStack
+        self.agentDescriptions = agentDescriptions
     }
 
     /// Whether there's an active subagent
@@ -277,11 +281,12 @@ struct SubagentState: Equatable, Sendable {
     }
 
     /// Start tracking a Task tool
-    nonisolated mutating func startTask(taskToolId: String) {
+    nonisolated mutating func startTask(taskToolId: String, description: String? = nil) {
         activeTasks[taskToolId] = TaskContext(
             taskToolId: taskToolId,
             startTime: Date(),
             agentId: nil,
+            description: description,
             subagentTools: []
         )
     }
@@ -294,6 +299,9 @@ struct SubagentState: Equatable, Sendable {
     /// Set the agentId for a Task (called when agent file is discovered)
     nonisolated mutating func setAgentId(_ agentId: String, for taskToolId: String) {
         activeTasks[taskToolId]?.agentId = agentId
+        if let description = activeTasks[taskToolId]?.description {
+            agentDescriptions[agentId] = description
+        }
     }
 
     /// Add a subagent tool to a specific Task by ID
@@ -306,7 +314,7 @@ struct SubagentState: Equatable, Sendable {
         activeTasks[taskId]?.subagentTools = tools
     }
 
-    /// Add a subagent tool to the most recent active Task (legacy fallback)
+    /// Add a subagent tool to the most recent active Task
     nonisolated mutating func addSubagentTool(_ tool: SubagentToolCall) {
         // Find most recent active task (for parallel Task support)
         guard let mostRecentTaskId = activeTasks.keys.max(by: {
@@ -331,6 +339,7 @@ struct SubagentState: Equatable, Sendable {
 struct TaskContext: Equatable, Sendable {
     let taskToolId: String
     let startTime: Date
-    var agentId: String?  // Set when agent file is discovered
+    var agentId: String?
+    var description: String?
     var subagentTools: [SubagentToolCall]
 }

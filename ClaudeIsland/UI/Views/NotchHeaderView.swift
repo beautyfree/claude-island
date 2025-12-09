@@ -130,14 +130,3 @@ struct PermissionIndicatorIcon: View {
     }
 }
 
-// NotchHeaderView is now integrated into NotchView for seamless matchedGeometryEffect animations
-// This struct is kept for backwards compatibility but the main header is in NotchView.headerRow
-
-struct NotchHeaderView: View {
-    @ObservedObject var viewModel: NotchViewModel
-
-    var body: some View {
-        // This is no longer used - header is now in NotchView.openedHeaderContent
-        EmptyView()
-    }
-}

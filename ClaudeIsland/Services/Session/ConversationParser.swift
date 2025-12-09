@@ -47,7 +47,7 @@ actor ConversationParser {
         var clearPending: Bool = false  // True if a /clear was just detected
     }
 
-    /// Parsed tool result data (legacy - kept for compatibility)
+    /// Parsed tool result data
     struct ToolResult {
         let content: String?
         let stdout: String?
@@ -261,7 +261,7 @@ actor ConversationParser {
 
     // MARK: - Full Conversation Parsing
 
-    /// Parse full conversation history for chat view (incremental - only reads new lines)
+    /// Parse full conversation history for chat view (returns ALL messages - use sparingly)
     func parseFullConversation(sessionId: String, cwd: String) -> [ChatMessage] {
         let sessionFile = Self.sessionFilePath(sessionId: sessionId, cwd: cwd)
 
@@ -274,6 +274,49 @@ actor ConversationParser {
         incrementalState[sessionId] = state
 
         return state.messages
+    }
+
+    /// Result of incremental parsing
+    struct IncrementalParseResult {
+        let newMessages: [ChatMessage]
+        let allMessages: [ChatMessage]
+        let completedToolIds: Set<String>
+        let toolResults: [String: ToolResult]
+        let structuredResults: [String: ToolResultData]
+        let clearDetected: Bool
+    }
+
+    /// Parse only NEW messages since last call (efficient incremental updates)
+    func parseIncremental(sessionId: String, cwd: String) -> IncrementalParseResult {
+        let sessionFile = Self.sessionFilePath(sessionId: sessionId, cwd: cwd)
+
+        guard FileManager.default.fileExists(atPath: sessionFile) else {
+            return IncrementalParseResult(
+                newMessages: [],
+                allMessages: [],
+                completedToolIds: [],
+                toolResults: [:],
+                structuredResults: [:],
+                clearDetected: false
+            )
+        }
+
+        var state = incrementalState[sessionId] ?? IncrementalParseState()
+        let newMessages = parseNewLines(filePath: sessionFile, state: &state)
+        let clearDetected = state.clearPending
+        if clearDetected {
+            state.clearPending = false
+        }
+        incrementalState[sessionId] = state
+
+        return IncrementalParseResult(
+            newMessages: newMessages,
+            allMessages: state.messages,
+            completedToolIds: state.completedToolIds,
+            toolResults: state.toolResults,
+            structuredResults: state.structuredResults,
+            clearDetected: clearDetected
+        )
     }
 
     /// Parse only new lines since last read (incremental)

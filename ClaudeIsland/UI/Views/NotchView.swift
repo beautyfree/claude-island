@@ -351,6 +351,8 @@ struct NotchView: View {
                 )
             case .menu:
                 NotchMenuView(viewModel: viewModel)
+            case .soundSelection:
+                SoundSelectionView(viewModel: viewModel)
             case .chat(let session):
                 ChatView(
                     sessionId: session.sessionId,
@@ -436,6 +438,11 @@ struct NotchView: View {
 
         // Bounce the notch when a session newly enters waitingForInput state
         if !newWaitingIds.isEmpty {
+            // Play notification sound if configured
+            if let soundName = AppSettings.notificationSound.soundName {
+                NSSound(named: soundName)?.play()
+            }
+
             // Trigger bounce animation to get user's attention
             DispatchQueue.main.async {
                 isBouncing = true

@@ -24,7 +24,7 @@
 
 ## Requirements
 
-- macOS 15.6+
+- macOS 15.0+
 - Claude Code CLI
 
 ## Install
